@@ -9,8 +9,8 @@ FIO_COMMON="--rw=randread --bs=4k --iodepth=32 --direct=1 --time_based --runtime
 
 jget() { python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
 
-pgrep -f 'ublkera daemon' >/dev/null || { ublkera daemon; sleep 1; }
-DPID=$(pgrep -f 'ublkera daemon' | paste -sd,)   # 複数残っていても pidstat に全部渡す
+pgrep -f '[u]blkera daemon' >/dev/null || { ublkera daemon; sleep 1; }
+DPID=$(pgrep -f '[u]blkera daemon' | paste -sd,)   # 複数残っていても pidstat に全部渡す
 echo "daemon pid=$DPID / vCPU=$(nproc)"
 
 echo "backing を brd に用意 (/dev/ram0,1 = 256MiB x2, ランダムデータ)"

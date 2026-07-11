@@ -7,7 +7,7 @@ step() { echo; echo "===== $* ====="; }
 run()  { printf '$ %s\n' "$*"; "$@"; }
 
 modprobe ublk_drv
-pgrep -f 'ublkera daemon' >/dev/null || run ublkera daemon
+pgrep -f '[u]blkera daemon' >/dev/null || run ublkera daemon
 
 step "step 1-2: 空デバイス作成 + ublk 公開"
 run truncate -s 64M /root/cbt-test.img
