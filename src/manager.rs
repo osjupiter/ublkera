@@ -133,7 +133,17 @@ impl DeviceManager {
                 let _ = supervisor.join();
                 return Err(e.context(format!("start device for '{}'", spec.backing)));
             }
-            Err(_) => bail!("device for '{}' did not come up within 15s", spec.backing),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // The supervisor died without reporting: a panic during startup.
+                let _ = supervisor.join();
+                bail!(
+                    "supervisor for '{}' died during startup (panicked)",
+                    spec.backing
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                bail!("device for '{}' did not come up within 15s", spec.backing)
+            }
         };
 
         let mut devs = self.devices.lock().unwrap();
@@ -156,6 +166,30 @@ impl DeviceManager {
             "granularity": spec.granularity,
             "current_era": state.current_era(),
         }))
+    }
+
+    /// Resolve a request target to a device id: a dev_id passes through, a
+    /// backing path is looked up among tracked devices (canonicalized so
+    /// symlinks and relative paths still match).
+    pub fn resolve(&self, target: &crate::ctl::Target) -> Result<u32> {
+        match (target.dev_id, target.backing.as_deref()) {
+            (Some(id), None) => Ok(id),
+            (Some(_), Some(_)) => bail!("specify either dev_id or backing, not both"),
+            (None, Some(b)) => {
+                self.reap();
+                let canon = std::fs::canonicalize(b).ok();
+                let devs = self.devices.lock().unwrap();
+                devs.values()
+                    .find(|m| {
+                        m.backing == b
+                            || canon.is_some()
+                                && std::fs::canonicalize(&m.backing).ok() == canon
+                    })
+                    .map(|m| m.dev_id)
+                    .with_context(|| format!("no tracked device with backing '{b}'"))
+            }
+            (None, None) => bail!("request needs dev_id or backing"),
+        }
     }
 
     pub fn del(&self, dev_id: u32) -> Result<Value> {
@@ -337,7 +371,6 @@ fn supervise_device(
     let ready_cell = Arc::new(Mutex::new(Some(ready_tx)));
     let hook_cell = ready_cell.clone();
     let device_ready = move |d_ctrl: &UblkCtrl| {
-        d_ctrl.dump();
         if let Some(tx) = hook_cell.lock().unwrap().take() {
             let _ = tx.send(Ok(d_ctrl.dev_info().dev_id));
         }

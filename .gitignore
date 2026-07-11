@@ -1,3 +1,4 @@
 /target
+/.vm/
 /go/.deps/
 /go/ublkera-go

@@ -62,22 +62,31 @@ enum Cmd {
     /// Detach a tracked device (saves its metadata)
     Del {
         /// device id
-        #[arg(short = 'n', long)]
-        number: u32,
+        #[arg(short = 'n', long, required_unless_present = "backing", conflicts_with = "backing")]
+        number: Option<u32>,
+        /// backing file/device path (alternative to -n)
+        #[arg(short = 'f', long)]
+        backing: Option<String>,
     },
     /// List tracked devices
     List,
     /// Show era/device status of one tracked device
     Status {
         /// device id
-        #[arg(short = 'n', long)]
-        number: u32,
+        #[arg(short = 'n', long, required_unless_present = "backing", conflicts_with = "backing")]
+        number: Option<u32>,
+        /// backing file/device path (alternative to -n)
+        #[arg(short = 'f', long)]
+        backing: Option<String>,
     },
     /// Close the current era and start a new one (returns the closed era)
     Checkpoint {
         /// device id
-        #[arg(short = 'n', long, required_unless_present = "all", conflicts_with = "all")]
+        #[arg(short = 'n', long, required_unless_present_any = ["all", "backing"], conflicts_with_all = ["all", "backing"])]
         number: Option<u32>,
+        /// backing file/device path (alternative to -n)
+        #[arg(short = 'f', long, conflicts_with = "all")]
+        backing: Option<String>,
         /// checkpoint every tracked device
         #[arg(long)]
         all: bool,
@@ -85,8 +94,11 @@ enum Cmd {
     /// Dump changed ranges as JSON
     Dump {
         /// device id
-        #[arg(short = 'n', long)]
-        number: u32,
+        #[arg(short = 'n', long, required_unless_present = "backing", conflicts_with = "backing")]
+        number: Option<u32>,
+        /// backing file/device path (alternative to -n)
+        #[arg(short = 'f', long)]
+        backing: Option<String>,
         /// only ranges written in an era newer than this (0 = everything)
         #[arg(long, default_value_t = 0)]
         since: u32,
@@ -113,9 +125,10 @@ fn run_daemon(sock_path: PathBuf, foreground: bool) -> Result<()> {
     let listener = ctl::bind(&sock_path)?;
 
     if !foreground {
+        // stdio must be detached (the daemonize default: /dev/null): keeping
+        // the launching terminal's fds makes any later write fail with EIO
+        // once that terminal goes away, and a failed println! panics.
         daemonize::Daemonize::new()
-            .stdout(daemonize::Stdio::keep())
-            .stderr(daemonize::Stdio::keep())
             .start()
             .context("daemonize failed")?;
     }
@@ -171,7 +184,7 @@ fn main() -> Result<()> {
             sock,
             json!({
                 "cmd": "add",
-                "backing": backing,
+                "backing": canonical_path(backing),
                 "granularity": granularity,
                 "meta": meta,
                 "dev_id": number,
@@ -181,19 +194,41 @@ fn main() -> Result<()> {
                 "buffered": buffered,
             }),
         ),
-        Cmd::Del { number } => ctl_call(sock, json!({"cmd": "del", "dev_id": number})),
+        Cmd::Del { number, backing } => ctl_call(sock, target_req("del", number, backing)),
         Cmd::List => ctl_call(sock, json!({"cmd": "list"})),
-        Cmd::Status { number } => ctl_call(sock, json!({"cmd": "status", "dev_id": number})),
-        Cmd::Checkpoint { number, all } => {
+        Cmd::Status { number, backing } => ctl_call(sock, target_req("status", number, backing)),
+        Cmd::Checkpoint { number, backing, all } => {
             if all {
                 ctl_call(sock, json!({"cmd": "checkpoint_all"}))
             } else {
-                ctl_call(sock, json!({"cmd": "checkpoint", "dev_id": number.unwrap()}))
+                ctl_call(sock, target_req("checkpoint", number, backing))
             }
         }
-        Cmd::Dump { number, since } => {
-            ctl_call(sock, json!({"cmd": "dump", "dev_id": number, "since": since}))
+        Cmd::Dump { number, backing, since } => {
+            let mut req = target_req("dump", number, backing);
+            req["since"] = json!(since);
+            ctl_call(sock, req)
         }
         Cmd::Shutdown => ctl_call(sock, json!({"cmd": "shutdown"})),
     }
+}
+
+/// Request body for commands that address one device: by id or backing path.
+/// Paths are canonicalized so relative paths and symlinks match what the
+/// daemon has stored.
+fn target_req(cmd: &str, number: Option<u32>, backing: Option<String>) -> serde_json::Value {
+    let mut req = json!({ "cmd": cmd });
+    if let Some(n) = number {
+        req["dev_id"] = json!(n);
+    }
+    if let Some(b) = backing {
+        req["backing"] = json!(canonical_path(b));
+    }
+    req
+}
+
+/// The daemon runs with cwd `/`, so paths must be absolute by the time they
+/// reach it; canonicalizing also makes `-f` lookups match through symlinks.
+fn canonical_path(p: String) -> String {
+    std::fs::canonicalize(&p).map_or(p, |c| c.display().to_string())
 }

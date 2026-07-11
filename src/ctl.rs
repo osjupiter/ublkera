@@ -12,17 +12,36 @@ use std::sync::Arc;
 
 pub const DEFAULT_SOCK: &str = "/run/ublkera/daemon.sock";
 
+/// Selects one tracked device: by id, or by backing path (as stored at add).
+#[derive(Deserialize)]
+pub struct Target {
+    #[serde(default)]
+    pub dev_id: Option<u32>,
+    #[serde(default)]
+    pub backing: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum Request {
     Add(DeviceSpec),
-    Del { dev_id: u32 },
+    Del {
+        #[serde(flatten)]
+        target: Target,
+    },
     List,
-    Status { dev_id: u32 },
-    Checkpoint { dev_id: u32 },
+    Status {
+        #[serde(flatten)]
+        target: Target,
+    },
+    Checkpoint {
+        #[serde(flatten)]
+        target: Target,
+    },
     CheckpointAll,
     Dump {
-        dev_id: u32,
+        #[serde(flatten)]
+        target: Target,
         #[serde(default)]
         since: u32,
     },
@@ -74,12 +93,20 @@ fn handle(manager: &DeviceManager, stream: UnixStream) -> Result<bool> {
         Ok(req) => {
             let result = match req {
                 Request::Add(spec) => manager.add(spec),
-                Request::Del { dev_id } => manager.del(dev_id),
+                Request::Del { target } => {
+                    manager.resolve(&target).and_then(|id| manager.del(id))
+                }
                 Request::List => Ok(manager.list()),
-                Request::Status { dev_id } => manager.status(dev_id),
-                Request::Checkpoint { dev_id } => manager.checkpoint(dev_id),
+                Request::Status { target } => {
+                    manager.resolve(&target).and_then(|id| manager.status(id))
+                }
+                Request::Checkpoint { target } => {
+                    manager.resolve(&target).and_then(|id| manager.checkpoint(id))
+                }
                 Request::CheckpointAll => Ok(manager.checkpoint_all()),
-                Request::Dump { dev_id, since } => manager.dump(dev_id, since),
+                Request::Dump { target, since } => {
+                    manager.resolve(&target).and_then(|id| manager.dump(id, since))
+                }
                 Request::Shutdown => {
                     shutdown = true;
                     Ok(json!({"ok": true, "shutdown": true}))

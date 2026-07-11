@@ -66,6 +66,11 @@ NR=$($CTL dump -n "$ID_B" | grep -c '"offset"')
 OFF=$($CTL dump -n "$ID_B" | jget offset)
 [ "$OFF" = $((10 * 1024 * 1024)) ] || fail "device B dirty offset: got $OFF"
 
+echo "E2E-VM: devices can be addressed by backing path (-f)"
+ID=$($CTL status -f /b.img | jget dev_id)
+[ "$ID" = "$ID_B" ] || fail "status -f /b.img returned dev_id $ID, want $ID_B"
+$CTL dump -f /a.img >/dev/null || fail "dump -f /a.img"
+
 echo "E2E-VM: checkpoint --all"
 NR=$($CTL checkpoint --all | grep -c '"closed_era"')
 [ "$NR" = 2 ] || fail "checkpoint --all covered $NR devices"
