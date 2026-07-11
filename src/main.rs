@@ -102,6 +102,9 @@ enum Cmd {
         /// only ranges written in an era newer than this (0 = everything)
         #[arg(long, default_value_t = 0)]
         since: u32,
+        /// tracking-history id (hex, from add/status); mismatch is an error
+        #[arg(long)]
+        generation: Option<String>,
     },
     /// Detach all devices and stop the daemon
     Shutdown,
@@ -204,9 +207,12 @@ fn main() -> Result<()> {
                 ctl_call(sock, target_req("checkpoint", number, backing))
             }
         }
-        Cmd::Dump { number, backing, since } => {
+        Cmd::Dump { number, backing, since, generation } => {
             let mut req = target_req("dump", number, backing);
             req["since"] = json!(since);
+            if let Some(g) = generation {
+                req["generation"] = json!(g);
+            }
             ctl_call(sock, req)
         }
         Cmd::Shutdown => ctl_call(sock, json!({"cmd": "shutdown"})),

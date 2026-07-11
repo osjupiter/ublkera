@@ -9,11 +9,17 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 const META_MAGIC: &[u8; 8] = b"UBLKERA1";
-const META_VERSION: u32 = 2;
+const META_VERSION: u32 = 3;
 
 pub struct EraState {
     pub granularity: u64,
     pub dev_size: u64,
+    /// Identity of this tracking history. Era numbers are small naturals that
+    /// restart at 1 whenever tracking starts fresh, so a bare era cursor can
+    /// collide with a *different* history and silently mean the wrong thing.
+    /// The generation is random per history and survives save/load, so a
+    /// cursor is safe when carried as (generation, era).
+    pub generation: u64,
     current_era: AtomicU32,
     eras: Vec<AtomicU32>,
 }
@@ -33,9 +39,14 @@ impl EraState {
         let nr_chunks = dev_size.div_ceil(granularity);
         let mut eras = Vec::with_capacity(nr_chunks as usize);
         eras.resize_with(nr_chunks as usize, || AtomicU32::new(0));
+        let mut gen = [0u8; 8];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut gen))
+            .context("read /dev/urandom for generation id")?;
         Ok(EraState {
             granularity,
             dev_size,
+            generation: u64::from_le_bytes(gen),
             current_era: AtomicU32::new(1),
             eras,
         })
@@ -137,7 +148,7 @@ impl EraState {
         {
             let mut f = std::fs::File::create(&tmp)
                 .with_context(|| format!("create {}", tmp.display()))?;
-            let mut buf = Vec::with_capacity(44 + self.eras.len() * 4);
+            let mut buf = Vec::with_capacity(52 + self.eras.len() * 4);
             buf.extend_from_slice(META_MAGIC);
             buf.extend_from_slice(&META_VERSION.to_le_bytes());
             buf.extend_from_slice(&self.granularity.to_le_bytes());
@@ -145,6 +156,7 @@ impl EraState {
             buf.extend_from_slice(&self.current_era().to_le_bytes());
             buf.extend_from_slice(&self.nr_chunks().to_le_bytes());
             buf.extend_from_slice(&(clean as u32).to_le_bytes());
+            buf.extend_from_slice(&self.generation.to_le_bytes());
             for e in &self.eras {
                 buf.extend_from_slice(&e.load(Ordering::Acquire).to_le_bytes());
             }
@@ -160,7 +172,7 @@ impl EraState {
     pub fn load(path: &Path, dev_size: u64, granularity: u64) -> Result<(Self, bool)> {
         let mut f = std::fs::File::open(path)
             .with_context(|| format!("open {}", path.display()))?;
-        let mut hdr = [0u8; 44];
+        let mut hdr = [0u8; 52];
         f.read_exact(&mut hdr)?;
         if &hdr[0..8] != META_MAGIC {
             bail!("{}: not a ublkera metadata file", path.display());
@@ -174,6 +186,7 @@ impl EraState {
         let m_era = u32::from_le_bytes(hdr[28..32].try_into().unwrap());
         let m_chunks = u64::from_le_bytes(hdr[32..40].try_into().unwrap());
         let m_clean = u32::from_le_bytes(hdr[40..44].try_into().unwrap()) != 0;
+        let m_gen = u64::from_le_bytes(hdr[44..52].try_into().unwrap());
         if m_gran != granularity {
             bail!(
                 "metadata granularity {m_gran} does not match requested {granularity}; \
@@ -188,7 +201,8 @@ impl EraState {
                 path.display()
             );
         }
-        let state = EraState::new(dev_size, granularity)?;
+        let mut state = EraState::new(dev_size, granularity)?;
+        state.generation = m_gen;
         if m_chunks != state.nr_chunks() {
             bail!("metadata chunk count mismatch");
         }

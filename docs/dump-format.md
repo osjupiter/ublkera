@@ -9,6 +9,7 @@
 {
   "ok": true,
   "dev_id": 0,
+  "generation": "9f3b2a1c8d4e6f01",
   "current_era": 3,
   "since": 1,
   "granularity": 65536,
@@ -26,6 +27,7 @@
 |---|---|---|
 | `ok` | bool | 成否。`false` のときは代わりに `error`(文字列)が入る |
 | `dev_id` | u32 | 対象デバイス。ブロックデバイスは `/dev/ublkb<dev_id>` |
+| `generation` | hex文字列 | トラッキング履歴のランダム ID。era は履歴が作り直されると 1 から再開するため、カーソルは (generation, era) のペアで保存し、次回 `dump --generation <hex>` で渡すと履歴違いが空差分ではなくエラーになる |
 | `current_era` | u32 | dump 時点で進行中の era |
 | `since` | u32 | リクエストで指定したフィルタ値(そのまま返す) |
 | `granularity` | u64 | トラッキングのチャンクサイズ(バイト)。attach 時の `-g` の値 |

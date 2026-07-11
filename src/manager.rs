@@ -205,6 +205,7 @@ impl DeviceManager {
             "backing": spec.backing,
             "dev_size": dev_size,
             "granularity": spec.granularity,
+            "generation": format!("{:016x}", state.generation),
             "current_era": state.current_era(),
         });
         if recovered_unclean {
@@ -297,15 +298,29 @@ impl DeviceManager {
         json!({"ok": true, "devices": results})
     }
 
-    pub fn dump(&self, dev_id: u32, since: u32) -> Result<Value> {
+    pub fn dump(&self, dev_id: u32, since: u32, generation: Option<&str>) -> Result<Value> {
         self.reap();
         let state = {
             let devs = self.devices.lock().unwrap();
             lookup(&devs, dev_id)?.state.clone()
         };
-        // A cursor from a previous life of this device (e.g. tracking was
-        // restarted without metadata and the era counter reset) must fail
-        // loudly, not return an empty diff.
+        // Era numbers restart at 1 whenever tracking starts fresh, so a bare
+        // era cursor can collide with a different history. A consumer that
+        // stores its cursor as (generation, era) and passes the generation
+        // here gets a hard error instead of a wrong diff.
+        if let Some(g) = generation {
+            let expect = u64::from_str_radix(g, 16)
+                .with_context(|| format!("generation '{g}' is not a hex number"))?;
+            if expect != state.generation {
+                bail!(
+                    "generation mismatch: cursor is from a different tracking history \
+                     (device is {:016x}) — take a full backup",
+                    state.generation
+                );
+            }
+        }
+        // Same idea for the era itself: a cursor beyond this history's counter
+        // must fail loudly, not return an empty diff.
         if since >= state.current_era() {
             bail!(
                 "since {} is not in this device's era history (current era is {}); \
@@ -319,6 +334,7 @@ impl DeviceManager {
         Ok(json!({
             "ok": true,
             "dev_id": dev_id,
+            "generation": format!("{:016x}", state.generation),
             "current_era": state.current_era(),
             "since": since,
             "granularity": state.granularity,
@@ -350,6 +366,7 @@ fn device_status(m: &Managed) -> Value {
         "backing": m.backing,
         "dev_size": m.state.dev_size,
         "granularity": m.state.granularity,
+        "generation": format!("{:016x}", m.state.generation),
         "current_era": m.state.current_era(),
         "nr_chunks": m.state.nr_chunks(),
         "written_chunks": m.state.written_chunks(),

@@ -44,6 +44,9 @@ enum Request {
         target: Target,
         #[serde(default)]
         since: u32,
+        /// Expected tracking-history id (hex); mismatch is a hard error.
+        #[serde(default)]
+        generation: Option<String>,
     },
     Shutdown,
 }
@@ -104,9 +107,13 @@ fn handle(manager: &DeviceManager, stream: UnixStream) -> Result<bool> {
                     manager.resolve(&target).and_then(|id| manager.checkpoint(id))
                 }
                 Request::CheckpointAll => Ok(manager.checkpoint_all()),
-                Request::Dump { target, since } => {
-                    manager.resolve(&target).and_then(|id| manager.dump(id, since))
-                }
+                Request::Dump {
+                    target,
+                    since,
+                    generation,
+                } => manager
+                    .resolve(&target)
+                    .and_then(|id| manager.dump(id, since, generation.as_deref())),
                 Request::Shutdown => {
                     shutdown = true;
                     Ok(json!({"ok": true, "shutdown": true}))

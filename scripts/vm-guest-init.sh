@@ -112,6 +112,8 @@ echo "E2E-VM: data integrity through ublk"
 cmp $DEV_A /a.img || fail "device A content differs from backing"
 
 echo "E2E-VM: detach A while B stays alive"
+GEN_A=$($CTL status -n "$ID_A" | grep -o '"generation": "[0-9a-f]*"' | grep -o '[0-9a-f]\{16\}')
+[ -n "$GEN_A" ] || fail "no generation id in status"
 $CTL del -n "$ID_A" >/dev/null || fail "detach A"
 dd if=/dev/urandom of=$DEV_B bs=4096 count=1 2>/dev/null || fail "B not writable after A detached"
 NR=$($CTL list | grep -c '"dev_id"')
@@ -124,6 +126,13 @@ ERA=$($CTL status -n "$ID_A" | jget current_era)
 [ "$ERA" -ge 2 ] || fail "era not restored from metadata (got $ERA)"
 NR=$($CTL dump -n "$ID_A" --since 1 | grep -c '"offset"')
 [ "$NR" = 1 ] || fail "era-2 dirty range lost across re-attach"
+
+echo "E2E-VM: generation survives re-attach; a mismatched cursor is rejected"
+GEN2=$($CTL status -n "$ID_A" | grep -o '"generation": "[0-9a-f]*"' | grep -o '[0-9a-f]\{16\}')
+[ "$GEN2" = "$GEN_A" ] || fail "generation changed across re-attach ($GEN_A -> $GEN2)"
+$CTL dump -n "$ID_A" --since 1 --generation "$GEN_A" >/dev/null || fail "dump with matching generation failed"
+$CTL dump -n "$ID_A" --since 1 --generation 0123456789abcdef 2>/dev/null \
+    && fail "dump with mismatched generation was accepted"
 
 echo "E2E-VM: attach a third device at runtime"
 dd if=/dev/zero of=/c.img bs=1M count=1 seek=15 2>/dev/null || fail "create c.img"
