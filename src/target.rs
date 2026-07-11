@@ -201,6 +201,14 @@ fn handle_io_cmd(q: &UblkQueue, tag: u16, io: &UblkIOCtx, era: &EraState, buf: &
 /// completion (ublk commands and backing IOs share the ring) and dispatching
 /// each to the state machine above. No async runtime, no per-tag tasks.
 pub fn queue_fn(qid: u16, dev: &UblkDev, era: Arc<EraState>) {
+    // Name this queue thread after the device node + queue ("ublkb0-q1"):
+    // the kernel truncates comm to 15 chars, so the inherited supervisor
+    // name ("ublkera-dev-/de...") is both cut off and identical across
+    // queues in tools like pidstat.
+    if let Ok(name) = std::ffi::CString::new(format!("ublkb{}-q{}", dev.dev_info.dev_id, qid)) {
+        unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
+    }
+
     // One buffer per queue slot (index == tag); lives for the queue's lifetime.
     let bufs = Rc::new(dev.alloc_queue_io_bufs());
     let bufs_h = bufs.clone();

@@ -446,8 +446,14 @@ fn supervise_device(
     let ready_cell = Arc::new(Mutex::new(Some(ready_tx)));
     let hook_cell = ready_cell.clone();
     let device_ready = move |d_ctrl: &UblkCtrl| {
+        // Rename the supervisor now that the dev id is known: comm is capped
+        // at 15 chars, so the backing-path spawn name gets truncated anyway.
+        let id = d_ctrl.dev_info().dev_id;
+        if let Ok(name) = std::ffi::CString::new(format!("ublkb{id}-sup")) {
+            unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
+        }
         if let Some(tx) = hook_cell.lock().unwrap().take() {
-            let _ = tx.send(Ok(d_ctrl.dev_info().dev_id));
+            let _ = tx.send(Ok(id));
         }
     };
 
