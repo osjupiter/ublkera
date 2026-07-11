@@ -112,14 +112,18 @@ echo '{"cmd":"dump","dev_id":0,"since":1}' \
 IO は 1:1 パススルー(ublk リクエスト1個 = バッキングへの io_uring 1発)で、
 ublkera が IO を granularity 単位に分割・結合することはない。
 
-参考実測(4 vCPU の QEMU ゲスト、バッキング tmpfs、fio 4k randread。
-再現は VM 内で [scripts/cpu-demo.sh](scripts/cpu-demo.sh) を root 実行):
+参考実測(4 vCPU の QEMU ゲスト、バッキング brd(RAM ディスク、O_DIRECT)、
+fio 4k randread。再現は VM 内で [scripts/cpu-demo.sh](scripts/cpu-demo.sh) を root 実行):
 
 | 構成 | デーモン合計CPU | IOPS |
 |---|---|---|
-| 1デバイス `-q 1`(既定) | ≈97%(1コア天井) | 49.6k |
-| 1デバイス `-q 4` | ≈275%(4コアに分散) | 130k |
-| 2デバイス(各 `-q 1`) | ≈134%(別コアに分離) | 33k + 33k |
+| 1デバイス `-q 1`(既定) | ≈63%(キュースレッド1本) | 67.5k |
+| 1デバイス `-q 4` | ≈214%(4コアに分散) | 188k |
+| 2デバイス(各 `-q 1`) | ≈121%(別コアに分離) | 53k + 53k |
+
+バッキングが O_DIRECT 非対応(例: tmpfs 上のファイル)だと io_uring が
+バッファード IO を io-wq カーネルワーカーに punt するため、iou-wrk-* スレッドが
+現れて遅くもなる。RAM でベンチするなら tmpfs ではなく brd を使うこと。
 
 ## メタデータは揮発性(消えても安全)
 
