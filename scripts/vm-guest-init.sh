@@ -40,8 +40,12 @@ wait_for "daemon socket" -S "$SOCK"
 echo "E2E-VM: attach two backing files"
 dd if=/dev/zero of=/a.img bs=1M count=1 seek=63 2>/dev/null || fail "create a.img"
 dd if=/dev/zero of=/b.img bs=1M count=1 seek=31 2>/dev/null || fail "create b.img"
-ID_A=$($CTL add -f /a.img -g 64K --meta /a.meta --buffered | jget dev_id)
+RESP=$($CTL add -f /a.img -g 64K --meta /a.meta --buffered)
+ID_A=$(echo "$RESP" | jget dev_id)
 [ -n "$ID_A" ] || fail "attach a.img"
+echo "$RESP" | grep -q '"zero_copy": *true' \
+    && echo "E2E-VM: zero-copy path active (UBLK_F_AUTO_BUF_REG)" \
+    || echo "E2E-VM: copy path (kernel lacks AUTO_BUF_REG)"
 ID_B=$($CTL add -f /b.img -g 64K --meta /b.meta --buffered | jget dev_id)
 [ -n "$ID_B" ] || fail "attach b.img"
 DEV_A=/dev/ublkb$ID_A

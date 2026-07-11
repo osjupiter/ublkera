@@ -58,6 +58,9 @@ enum Cmd {
         /// use buffered IO on the backing file instead of O_DIRECT
         #[arg(long)]
         buffered: bool,
+        /// disable zero-copy even when the kernel supports it
+        #[arg(long)]
+        no_zero_copy: bool,
     },
     /// Detach a tracked device (saves its metadata)
     Del {
@@ -183,6 +186,7 @@ fn main() -> Result<()> {
             depth,
             buf_size,
             buffered,
+            no_zero_copy,
         } => ctl_call(
             sock,
             json!({
@@ -195,6 +199,7 @@ fn main() -> Result<()> {
                 "depth": depth,
                 "buf_size": buf_size,
                 "buffered": buffered,
+                "no_zero_copy": no_zero_copy,
             }),
         ),
         Cmd::Del { number, backing } => ctl_call(sock, target_req("del", number, backing)),
