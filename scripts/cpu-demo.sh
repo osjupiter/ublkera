@@ -5,7 +5,7 @@
 # 2分割して使う(初回のみ作成)。ゲスト内で root 実行。
 set -euo pipefail
 
-FIO_COMMON="--rw=randread --bs=4k --iodepth=32 --size=1G --direct=1 --time_based --runtime=12 --group_reporting"
+FIO_COMMON="--rw=randwrite --bs=4k --iodepth=32 --size=1G --direct=1 --time_based --runtime=12 --group_reporting"
 
 jget() { python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
 
@@ -31,7 +31,7 @@ show_threads() {  # 8秒間のスレッド別 CPU%(1%超だけ表示)。CPU列 =
 
 fio_load() { # fio_load <dev> <numjobs> <name>
     fio --name="$3" --filename="$1" --numjobs="$2" $FIO_COMMON 2>&1 \
-        | grep -E '^\s*read: IOPS' | sed "s/^ */  $3 /"
+        | grep -E '^\s*write: IOPS' | sed "s/^ */  $3 /"
 }
 
 echo
