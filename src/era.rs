@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 const META_MAGIC: &[u8; 8] = b"UBLKERA1";
-const META_VERSION: u32 = 1;
+const META_VERSION: u32 = 2;
 
 pub struct EraState {
     pub granularity: u64,
@@ -116,19 +116,35 @@ impl EraState {
         ranges
     }
 
-    /// Persist to `path` atomically (write temp file + rename).
-    pub fn save(&self, path: &Path) -> Result<()> {
+    /// Treat every chunk as written in the current era. Used when metadata
+    /// turns out to be stale (unclean shutdown): any `dump --since <older era>`
+    /// then reports the whole device, so the consumer's next "incremental"
+    /// backup is automatically a full copy.
+    pub fn mark_all_dirty(&self) {
+        let era = self.current_era();
+        for chunk in &self.eras {
+            chunk.fetch_max(era, Ordering::AcqRel);
+        }
+    }
+
+    /// Persist to `path` atomically (write temp file + rename). `clean` records
+    /// whether this snapshot is complete: false while the device is attached
+    /// (writes keep landing after the save), true only on a final save when no
+    /// more writes can happen. A crash leaves the last save marked unclean,
+    /// which `load` turns into "everything changed".
+    pub fn save(&self, path: &Path, clean: bool) -> Result<()> {
         let tmp = path.with_extension("tmp");
         {
             let mut f = std::fs::File::create(&tmp)
                 .with_context(|| format!("create {}", tmp.display()))?;
-            let mut buf = Vec::with_capacity(40 + self.eras.len() * 4);
+            let mut buf = Vec::with_capacity(44 + self.eras.len() * 4);
             buf.extend_from_slice(META_MAGIC);
             buf.extend_from_slice(&META_VERSION.to_le_bytes());
             buf.extend_from_slice(&self.granularity.to_le_bytes());
             buf.extend_from_slice(&self.dev_size.to_le_bytes());
             buf.extend_from_slice(&self.current_era().to_le_bytes());
             buf.extend_from_slice(&self.nr_chunks().to_le_bytes());
+            buf.extend_from_slice(&(clean as u32).to_le_bytes());
             for e in &self.eras {
                 buf.extend_from_slice(&e.load(Ordering::Acquire).to_le_bytes());
             }
@@ -140,10 +156,11 @@ impl EraState {
     }
 
     /// Load a previously saved state; granularity and device size must match.
-    pub fn load(path: &Path, dev_size: u64, granularity: u64) -> Result<Self> {
+    /// Returns the state and whether the save was clean (complete).
+    pub fn load(path: &Path, dev_size: u64, granularity: u64) -> Result<(Self, bool)> {
         let mut f = std::fs::File::open(path)
             .with_context(|| format!("open {}", path.display()))?;
-        let mut hdr = [0u8; 40];
+        let mut hdr = [0u8; 44];
         f.read_exact(&mut hdr)?;
         if &hdr[0..8] != META_MAGIC {
             bail!("{}: not a ublkera metadata file", path.display());
@@ -156,6 +173,7 @@ impl EraState {
         let m_size = u64::from_le_bytes(hdr[20..28].try_into().unwrap());
         let m_era = u32::from_le_bytes(hdr[28..32].try_into().unwrap());
         let m_chunks = u64::from_le_bytes(hdr[32..40].try_into().unwrap());
+        let m_clean = u32::from_le_bytes(hdr[40..44].try_into().unwrap()) != 0;
         if m_gran != granularity {
             bail!(
                 "metadata granularity {m_gran} does not match requested {granularity}; \
@@ -181,7 +199,7 @@ impl EraState {
             e.store(v, Ordering::Relaxed);
         }
         state.current_era.store(m_era, Ordering::Release);
-        Ok(state)
+        Ok((state, m_clean))
     }
 }
 
@@ -218,14 +236,37 @@ mod tests {
         let s = EraState::new(1 << 20, 65536).unwrap();
         s.mark_write(65536 * 7, 4096);
         s.checkpoint();
-        s.save(&path).unwrap();
+        s.save(&path, true).unwrap();
 
-        let l = EraState::load(&path, 1 << 20, 65536).unwrap();
+        let (l, clean) = EraState::load(&path, 1 << 20, 65536).unwrap();
+        assert!(clean);
         assert_eq!(l.current_era(), 2);
         let r = l.ranges_since(0);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].offset, 65536 * 7);
         assert!(EraState::load(&path, 1 << 21, 65536).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An unclean save (crash while attached) must be detectable, and
+    /// mark_all_dirty must turn it into "everything changed since any
+    /// older era" — the automatic full-copy fallback.
+    #[test]
+    fn unclean_load_falls_back_to_full_dirty() {
+        let dir = std::env::temp_dir().join(format!("ublkera-test-uc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("meta.bin");
+
+        let s = EraState::new(1 << 20, 65536).unwrap();
+        s.mark_write(0, 1);
+        s.checkpoint(); // era 2 now current; cursor 1 is a valid consumer cursor
+        s.save(&path, false).unwrap(); // attached marker: crash would leave this
+
+        let (l, clean) = EraState::load(&path, 1 << 20, 65536).unwrap();
+        assert!(!clean);
+        l.mark_all_dirty();
+        let dirty: u64 = l.ranges_since(1).iter().map(|r| r.len).sum();
+        assert_eq!(dirty, 1 << 20, "whole device must be reported changed");
         std::fs::remove_dir_all(&dir).ok();
     }
 

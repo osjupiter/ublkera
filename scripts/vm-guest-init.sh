@@ -137,6 +137,31 @@ i=0
 while ls /dev/ublkb* >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 ls /dev/ublkb* >/dev/null 2>&1 && fail "devices still present after shutdown"
 
+echo "E2E-VM: kill -9 (crash) makes the next attach report everything changed"
+rm -f "$SOCK"
+$CTL daemon --foreground &
+DPID=$!
+wait_for "daemon socket" -S "$SOCK"
+ID_A=$($CTL add -f /a.img -g 64K --meta /a.meta --buffered | jget dev_id)
+[ -n "$ID_A" ] || fail "attach for crash test"
+ERA=$($CTL status -n "$ID_A" | jget current_era)
+kill -9 "$DPID"
+i=0
+while ls /dev/ublkb* >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+ls /dev/ublkb* >/dev/null 2>&1 && fail "device still present after daemon SIGKILL"
+rm -f "$SOCK"
+$CTL daemon --foreground &
+wait_for "daemon socket" -S "$SOCK"
+ADD=$($CTL add -f /a.img -g 64K --meta /a.meta --buffered)
+echo "$ADD" | grep -q '"recovered_unclean": *true' || fail "unclean recovery not flagged in add response"
+BYTES=$($CTL dump -f /a.img --since $((ERA - 1)) | jget dirty_bytes)
+[ "$BYTES" = $((64 * 1024 * 1024)) ] || fail "crash fallback: whole device expected dirty, got $BYTES bytes"
+$CTL dump -f /a.img --since 99 2>/dev/null && fail "stale --since cursor was accepted"
+$CTL shutdown >/dev/null || fail "shutdown after crash test"
+i=0
+while ls /dev/ublkb* >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+ls /dev/ublkb* >/dev/null 2>&1 && fail "devices still present after crash-test shutdown"
+
 if [ -x /ublkera-go ]; then
     echo "E2E-VM: go implementation (libublksrv/cgo): attach and track"
     dd if=/dev/zero of=/g.img bs=1M count=1 seek=31 2>/dev/null || fail "create g.img"

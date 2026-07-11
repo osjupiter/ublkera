@@ -115,19 +115,46 @@ impl DeviceManager {
             }
         }
 
+        let mut recovered_unclean = false;
         let state = Arc::new(match &spec.meta {
             Some(path) if path.exists() => {
-                let s = EraState::load(path, dev_size, spec.granularity)?;
-                log::info!(
-                    "loaded metadata from {} (era {}, {} written chunks)",
-                    path.display(),
-                    s.current_era(),
-                    s.written_chunks()
-                );
+                let (s, clean) = EraState::load(path, dev_size, spec.granularity)?;
+                if clean {
+                    log::info!(
+                        "loaded metadata from {} (era {}, {} written chunks)",
+                        path.display(),
+                        s.current_era(),
+                        s.written_chunks()
+                    );
+                } else {
+                    // The last save happened while the device was attached
+                    // (crash / power loss): writes after it are missing from
+                    // the map. Metadata is volatile by design — mark the whole
+                    // device changed so the consumer's next diff degrades to a
+                    // full copy instead of silently under-reporting.
+                    s.mark_all_dirty();
+                    recovered_unclean = true;
+                    log::warn!(
+                        "metadata {} was not closed cleanly; treating the whole \
+                         device as changed in era {}",
+                        path.display(),
+                        s.current_era()
+                    );
+                }
                 s
             }
             _ => EraState::new(dev_size, spec.granularity)?,
         });
+
+        // Attach marker: an unclean save on disk before the device goes live.
+        // If we crash (or even fail to start) from here on, the next attach
+        // sees it and falls back to "everything changed". Rewritten clean by
+        // the supervisor's final save on detach.
+        if let Some(path) = &spec.meta {
+            state
+                .save(path, false)
+                .with_context(|| format!("write attach marker to {}", path.display()))?;
+        }
 
         // The supervisor owns the whole device lifetime. It reports readiness
         // (or the startup error) exactly once through this channel.
@@ -171,7 +198,7 @@ impl DeviceManager {
                 supervisor,
             },
         );
-        Ok(json!({
+        let mut resp = json!({
             "ok": true,
             "dev_id": dev_id,
             "bdev": format!("/dev/ublkb{dev_id}"),
@@ -179,7 +206,11 @@ impl DeviceManager {
             "dev_size": dev_size,
             "granularity": spec.granularity,
             "current_era": state.current_era(),
-        }))
+        });
+        if recovered_unclean {
+            resp["recovered_unclean"] = json!(true);
+        }
+        Ok(resp)
     }
 
     /// Resolve a request target to a device id: a dev_id passes through, a
@@ -272,6 +303,17 @@ impl DeviceManager {
             let devs = self.devices.lock().unwrap();
             lookup(&devs, dev_id)?.state.clone()
         };
+        // A cursor from a previous life of this device (e.g. tracking was
+        // restarted without metadata and the era counter reset) must fail
+        // loudly, not return an empty diff.
+        if since >= state.current_era() {
+            bail!(
+                "since {} is not in this device's era history (current era is {}); \
+                 the cursor is stale — take a full backup",
+                since,
+                state.current_era()
+            );
+        }
         let ranges = state.ranges_since(since);
         let dirty_bytes: u64 = ranges.iter().map(|r| r.len).sum();
         Ok(json!({
@@ -330,7 +372,9 @@ fn checkpoint_one(
         "current_era": current,
     });
     if let Some(path) = meta {
-        match state.save(path) {
+        // Still attached: writes keep landing after this save, so it stays
+        // marked unclean. Only the final save on detach is clean.
+        match state.save(path, false) {
             Ok(()) => resp["meta_saved"] = json!(true),
             Err(e) => {
                 log::error!("metadata save for device {dev_id} failed: {e:#}");
@@ -403,8 +447,9 @@ fn supervise_device(
         }
     }
 
+    // The device is gone, no more writes can land: this snapshot is complete.
     if let Some(path) = &spec.meta {
-        if let Err(e) = state.save(path) {
+        if let Err(e) = state.save(path, true) {
             log::error!("final metadata save for '{}' failed: {e:#}", spec.backing);
         }
     }
