@@ -112,6 +112,30 @@ echo '{"cmd":"dump","dev_id":0,"since":1}' \
 IO は 1:1 パススルー(ublk リクエスト1個 = バッキングへの io_uring 1発)で、
 ublkera が IO を granularity 単位に分割・結合することはない。
 
+### メモリ消費の見積もり
+
+デバイスあたりの常駐メモリは2つの項の和:
+
+```
+IO バッファ: queues × depth × buf_size          (既定 1 × 64 × 512KiB = 32 MiB)
+era マップ : デバイスサイズ / granularity × 4B  (メタデータファイルもほぼ同サイズ)
+```
+
+| デバイスサイズ | granularity | era マップ | IO バッファ(既定) | 合計目安 |
+|---|---|---|---|---|
+| 100 GiB | 64 KiB | 6.25 MiB | 32 MiB | ≈38 MiB |
+| 1 TiB | 64 KiB | 64 MiB | 32 MiB | ≈96 MiB |
+| 1 TiB | 1 MiB | 4 MiB | 32 MiB | ≈36 MiB |
+| 10 TiB | 1 MiB | 40 MiB | 32 MiB | ≈72 MiB |
+
+- IO バッファは `-q`/`-d`/`-b` にそのまま比例する(`-q 4` なら 128 MiB)。
+  多数のデバイスを抱えるデーモンではここが支配項。ただしページが載るのは
+  実際に IO で使われてからで、アイドルなら RSS には現れない
+  (実測: 1 TiB を attach 直後の RSS 増分 ≈65 MiB = era マップ分のみ)
+- era マップは granularity を上げれば線形に減るが、差分の粒度(過大近似の
+  粗さ)とのトレードオフ
+- 詳細(スレッドスタック等も含む)は [docs/memory.md](docs/memory.md)
+
 参考実測(4 vCPU の QEMU ゲスト、バッキング brd(RAM ディスク、O_DIRECT)、
 fio 4k randread。再現は VM 内で [scripts/cpu-demo.sh](scripts/cpu-demo.sh) を root 実行):
 
