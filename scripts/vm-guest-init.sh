@@ -55,6 +55,11 @@ NR=$($CTL list | grep -c '"dev_id"')
 echo "E2E-VM: double-attach of the same backing must be rejected"
 $CTL add -f /a.img 2>/dev/null && fail "double attach was accepted"
 
+echo "E2E-VM: add with an in-use explicit id must fail without killing the device"
+dd if=/dev/zero of=/z.img bs=1M count=1 seek=7 2>/dev/null || fail "create z.img"
+$CTL add -f /z.img -n "$ID_A" 2>/dev/null && fail "explicit-id add over a live device was accepted"
+[ -b "$DEV_A" ] || fail "device A vanished after the rejected explicit-id add"
+
 echo "E2E-VM: per-device tracking is independent"
 dd if=/dev/urandom of=$DEV_A bs=4096 count=1 2>/dev/null || fail "write A"
 dd if=/dev/urandom of=$DEV_B bs=1M count=2 seek=10 2>/dev/null || fail "write B"

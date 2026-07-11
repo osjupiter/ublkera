@@ -85,6 +85,20 @@ impl DeviceManager {
     pub fn add(&self, spec: DeviceSpec) -> Result<Value> {
         self.reap();
 
+        // An explicit id must be pre-checked: libublk's cleanup after a
+        // failed ADD_DEV (e.g. EEXIST) issues DEL_DEV on that id even when
+        // the device belongs to another ublk server, killing it.
+        if spec.dev_id >= 0 {
+            let ctl = format!("/dev/ublkc{}", spec.dev_id);
+            if std::path::Path::new(&ctl).exists() {
+                bail!(
+                    "ublk device id {} is already in use ({} exists)",
+                    spec.dev_id,
+                    ctl
+                );
+            }
+        }
+
         let back_file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
