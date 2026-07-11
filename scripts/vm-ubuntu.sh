@@ -13,12 +13,12 @@
 #   ./scripts/vm-ubuntu.sh down      # power off
 #   ./scripts/vm-ubuntu.sh destroy   # power off and delete the VM disk
 #
-# Tunables (env): UBUNTU_SERIES=noble SSH_PORT=2222 MEM=2048 CPUS=2 DISK=16G
+# Tunables (env): UBUNTU_SERIES=noble SSH_PORT=2222 MEM=2048 CPUS=2 DISK=16G VM_STATE=.vm
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO=$PWD
-STATE=$REPO/.vm
+STATE=${VM_STATE:-$REPO/.vm}
 CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/ublkera
 
 UBUNTU_SERIES=${UBUNTU_SERIES:-noble}
