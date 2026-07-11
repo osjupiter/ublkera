@@ -41,12 +41,6 @@ pub struct DeviceSpec {
     pub meta: Option<PathBuf>,
     #[serde(default = "default_dev_id")]
     pub dev_id: i32,
-    /// Opt out of zero-copy even when the kernel supports it.
-    #[serde(default)]
-    pub no_zero_copy: bool,
-    /// Resolved at add time: negotiate UBLK_F_AUTO_BUF_REG zero-copy.
-    #[serde(skip)]
-    pub zc: bool,
     #[serde(default = "default_queues")]
     pub queues: u16,
     #[serde(default = "default_depth")]
@@ -88,9 +82,8 @@ impl DeviceManager {
         }
     }
 
-    pub fn add(&self, mut spec: DeviceSpec) -> Result<Value> {
+    pub fn add(&self, spec: DeviceSpec) -> Result<Value> {
         self.reap();
-        spec.zc = !spec.no_zero_copy && zero_copy_supported();
 
         // An explicit id must be pre-checked: libublk's cleanup after a
         // failed ADD_DEV (e.g. EEXIST) issues DEL_DEV on that id even when
@@ -214,7 +207,6 @@ impl DeviceManager {
             "granularity": spec.granularity,
             "generation": format!("{:016x}", state.generation),
             "current_era": state.current_era(),
-            "zero_copy": spec.zc,
         });
         if recovered_unclean {
             resp["recovered_unclean"] = json!(true);
@@ -362,14 +354,6 @@ impl DeviceManager {
     }
 }
 
-/// Zero-copy needs UBLK_F_AUTO_BUF_REG (kernel 6.16+); probe once per add.
-fn zero_copy_supported() -> bool {
-    UblkCtrl::get_features().is_some_and(|f| {
-        f & (libublk::sys::UBLK_F_SUPPORT_ZERO_COPY as u64) != 0
-            && f & (libublk::sys::UBLK_F_AUTO_BUF_REG as u64) != 0
-    })
-}
-
 fn lookup(devs: &HashMap<u32, Managed>, dev_id: u32) -> Result<&Managed> {
     devs.get(&dev_id)
         .with_context(|| format!("device {dev_id} is not managed by this daemon"))
@@ -436,21 +420,15 @@ fn supervise_device(
         direct_io: !spec.buffered,
     };
 
-    let builder = libublk::ctrl::UblkCtrlBuilder::default()
+    let ctrl = match libublk::ctrl::UblkCtrlBuilder::default()
         .name("ublkera")
         .id(spec.dev_id)
         .nr_queues(spec.queues)
         .depth(spec.depth)
         .io_buf_bytes(spec.buf_size)
-        .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV);
-    let builder = if spec.zc {
-        builder.ctrl_flags(
-            (libublk::sys::UBLK_F_SUPPORT_ZERO_COPY | libublk::sys::UBLK_F_AUTO_BUF_REG) as u64,
-        )
-    } else {
-        builder
-    };
-    let ctrl = match builder.build() {
+        .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             let _ = ready_tx.send(Err(anyhow::anyhow!(

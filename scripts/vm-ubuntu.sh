@@ -110,10 +110,6 @@ EOF
         cloud-localds "$SEED_IMG" "$STATE/user-data" "$STATE/meta-data"
     fi
 
-    # experiment data disk (virtio): /dev/disk/by-id/virtio-ublkera-data in the guest
-    DATA_IMG=$STATE/data.qcow2
-    [ -f "$DATA_IMG" ] || qemu-img create -q -f qcow2 "$DATA_IMG" 8G
-
     local port kvm_args=""
     port=$(pick_port)
     echo "$port" > "$PORTFILE"
@@ -126,11 +122,8 @@ EOF
     echo "== boot VM (ssh port $port, serial log: $CONSOLE) =="
     qemu-system-x86_64 \
         $kvm_args -m "$MEM" -smp "$CPUS" \
-        -drive file="$DISK_IMG",if=none,id=os0,format=qcow2 \
-        -device virtio-blk-pci,drive=os0,bootindex=0 \
+        -drive file="$DISK_IMG",if=virtio,format=qcow2 \
         -drive file="$SEED_IMG",if=virtio,format=raw,readonly=on \
-        -drive file="$DATA_IMG",if=none,id=data0,format=qcow2 \
-        -device virtio-blk-pci,drive=data0,serial=ublkera-data \
         -netdev user,id=n0,hostfwd=tcp:127.0.0.1:$port-:22 \
         -device virtio-net-pci,netdev=n0 \
         -display none -daemonize \
