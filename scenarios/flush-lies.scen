@@ -1,0 +1,7 @@
+# flush-lie 注入: fsync が ack を返しても実際には何も確定されない
+write  off=0 len=1M pattern=base fsync
+set    flush_lie_pm=1000
+write  off=0 len=1M pattern=lied fsync
+crash  mode=drop
+expect off=0 len=1M pattern=base
+set    flush_lie_pm=0

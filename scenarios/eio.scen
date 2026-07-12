@@ -1,0 +1,6 @@
+# EIO 注入は上に伝播し、解除すればデバイスは健全に戻る
+set    error_pm=1000
+write-fails off=0 len=4K pattern=x
+set    error_pm=0
+write  off=0 len=4K pattern=recovered fsync
+expect off=0 len=4K pattern=recovered

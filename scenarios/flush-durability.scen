@@ -1,0 +1,4 @@
+# fsync が ack した書き込みは電源断後も必ず残る(FLUSH の基本契約)
+write  off=0 len=1M pattern=durable fsync
+crash  mode=drop
+expect off=0 len=1M pattern=durable

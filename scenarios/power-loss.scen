@@ -1,0 +1,6 @@
+# 未 fsync の完了済み書き込みは電源断で消えてよい(直前の確定内容に戻る)
+write  off=0 len=1M pattern=base fsync
+write  off=0 len=1M pattern=doomed
+expect off=0 len=1M pattern=doomed    # クラッシュ前は read-your-writes
+crash  mode=drop
+expect off=0 len=1M pattern=base

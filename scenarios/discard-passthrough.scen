@@ -1,0 +1,7 @@
+# DISCARD は SUT を素通しされ、範囲はゼロで読み返せる。
+# 残り(64K..256K)の内容は無傷であること(パターンはオフセット起点なので
+# 部分範囲の expect が書ける)。SUT のデバイスは /dev/ublkb1 固定。
+write  off=0 len=256K pattern=dbase fsync
+run    blkdiscard -o 0 -l 65536 /dev/ublkb1
+expect off=0   len=64K  pattern=zero
+expect off=64K len=192K pattern=dbase

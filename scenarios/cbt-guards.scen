@@ -1,0 +1,6 @@
+# CBT カーソルのガード: この履歴に存在しない era や別 generation の
+# カーソルは、空の差分ではなく明示的なエラーで拒否される。
+run    /ublkera --socket /tmp/era.sock checkpoint -n 1
+fail   /ublkera --socket /tmp/era.sock dump -n 1 --since 999
+fail   /ublkera --socket /tmp/era.sock dump -n 1 --since 1 --generation 0123456789abcdef
+run    /ublkera --socket /tmp/era.sock dump -n 1 --since 1

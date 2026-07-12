@@ -1,0 +1,16 @@
+# ランナー自体の自己テスト: 全 verb を一巡する。デバイスの事前内容に
+# 依存しないよう、まず自分の base を fsync 付きで確定させる。
+# SUT の契約テストは各 SUT のリポジトリが所有する(例: ublkera/scenarios/)。
+write  off=0 len=128K pattern=sbase fsync
+write  off=64K len=64K pattern=tail
+expect off=0 len=64K pattern=sbase
+expect off=64K len=64K pattern=tail
+crash  mode=drop
+expect off=0 len=128K pattern=sbase  # 未 fsync の tail は消えて sbase に戻る
+set    error_pm=1000
+write-fails off=0 len=4K pattern=x
+set    error_pm=0
+flush
+sleep  ms=10
+run    true
+fail   false

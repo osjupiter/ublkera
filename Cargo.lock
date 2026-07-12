@@ -1079,6 +1079,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ublkfault"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "io-uring",
+ "libc",
+ "libublk",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"

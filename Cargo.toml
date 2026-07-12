@@ -1,3 +1,8 @@
+[workspace]
+members = ["ublkfault"]
+# plain `cargo build/test` covers the test tool too
+default-members = [".", "ublkfault"]
+
 [package]
 name = "ublkera"
 version = "0.1.0"
