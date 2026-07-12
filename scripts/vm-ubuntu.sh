@@ -8,6 +8,7 @@
 #   ./scripts/vm-ubuntu.sh ssh       # log in (or: ssh -- <command>)
 #   ./scripts/vm-ubuntu.sh push      # re-push a rebuilt binary/scripts
 #   ./scripts/vm-ubuntu.sh test      # run scripts/e2e.sh inside the guest
+#   ./scripts/vm-ubuntu.sh stress    # run scripts/blkstress.sh inside the guest
 #   ./scripts/vm-ubuntu.sh console   # follow the serial console log
 #   ./scripts/vm-ubuntu.sh status    # is the VM running?
 #   ./scripts/vm-ubuntu.sh down      # power off
@@ -163,16 +164,26 @@ cmd_push() {
     [ -x "$bin" ] || fail "build first: cargo build --release"
     vm_pid >/dev/null || fail "VM not running (./scripts/vm-ubuntu.sh up)"
 
+    local chaos="${bin%/*}/chaos" extras=""
+    [ -x "$chaos" ] && extras=$chaos
+
     echo "== push $bin and scripts/ into the guest (~/ublkera) =="
     # mirror the repo layout so scripts/e2e.sh works unchanged in the guest
-    tar -cf - scripts "$bin" | vm_ssh 'mkdir -p ublkera && tar -xf - -C ublkera'
+    tar -cf - scripts "$bin" $extras | vm_ssh 'mkdir -p ublkera && tar -xf - -C ublkera'
     vm_ssh 'sudo install -m 755 ~/ublkera/target/*/ublkera /usr/local/bin/ublkera' 2>/dev/null || true
+    vm_ssh 'sudo install -m 755 ~/ublkera/target/*/chaos /usr/local/bin/ublkera-chaos' 2>/dev/null || true
 }
 
 cmd_test() {
     cmd_push
     echo "== run e2e suite inside the guest =="
     vm_ssh -t 'cd ~/ublkera && sudo ./scripts/e2e.sh'
+}
+
+cmd_stress() {
+    cmd_push
+    echo "== run block-layer stress inside the guest =="
+    vm_ssh -t 'sudo bash ~/ublkera/scripts/blkstress.sh'
 }
 
 cmd_down() {
@@ -205,6 +216,7 @@ case "${1:-up}" in
     ssh)      shift; [ "${1:-}" = "--" ] && shift; vm_ssh -t "$@" ;;
     push)     cmd_push ;;
     test)     cmd_test ;;
+    stress)   cmd_stress ;;
     console)  tail -f "$CONSOLE" ;;
     status)   cmd_status ;;
     down)     cmd_down ;;
