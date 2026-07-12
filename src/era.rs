@@ -9,7 +9,35 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 const META_MAGIC: &[u8; 8] = b"UBLKERA1";
-const META_VERSION: u32 = 3;
+const META_VERSION: u32 = 4;
+/// header: magic8 + version4 + granularity8 + dev_size8 + era4 + chunks8 +
+/// clean4 + generation8 + crc4, then chunks*4 bytes of per-chunk eras
+const HDR_LEN: usize = 56;
+/// CRC32 over the whole file with this field zeroed. Catches external bit rot
+/// and truncation of the payload — a crash cannot corrupt the file (save
+/// replaces it atomically via rename), but disks and copy mistakes can, and a
+/// corrupted era array would silently under-report changes.
+const CRC_OFF: usize = 52;
+
+/// CRC32 (IEEE, reflected) over the concatenation of `parts`; table-driven,
+/// no dependency.
+fn crc32(parts: &[&[u8]]) -> u32 {
+    let mut table = [0u32; 256];
+    for (i, e) in table.iter_mut().enumerate() {
+        let mut c = i as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+        }
+        *e = c;
+    }
+    let mut crc = 0xFFFF_FFFFu32;
+    for part in parts {
+        for &b in *part {
+            crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+        }
+    }
+    !crc
+}
 
 pub struct EraState {
     pub granularity: u64,
@@ -148,7 +176,7 @@ impl EraState {
         {
             let mut f = std::fs::File::create(&tmp)
                 .with_context(|| format!("create {}", tmp.display()))?;
-            let mut buf = Vec::with_capacity(52 + self.eras.len() * 4);
+            let mut buf = Vec::with_capacity(HDR_LEN + self.eras.len() * 4);
             buf.extend_from_slice(META_MAGIC);
             buf.extend_from_slice(&META_VERSION.to_le_bytes());
             buf.extend_from_slice(&self.granularity.to_le_bytes());
@@ -157,9 +185,12 @@ impl EraState {
             buf.extend_from_slice(&self.nr_chunks().to_le_bytes());
             buf.extend_from_slice(&(clean as u32).to_le_bytes());
             buf.extend_from_slice(&self.generation.to_le_bytes());
+            buf.extend_from_slice(&0u32.to_le_bytes()); // crc, filled in below
             for e in &self.eras {
                 buf.extend_from_slice(&e.load(Ordering::Acquire).to_le_bytes());
             }
+            let crc = crc32(&[&buf]);
+            buf[CRC_OFF..CRC_OFF + 4].copy_from_slice(&crc.to_le_bytes());
             f.write_all(&buf)?;
             f.sync_all()?;
         }
@@ -169,24 +200,38 @@ impl EraState {
 
     /// Load a previously saved state; granularity and device size must match.
     /// Returns the state and whether the save was clean (complete).
+    /// Any corruption (bit rot, truncation, trailing garbage) fails the CRC
+    /// and is a hard error: metadata is disposable, so the caller's remedy is
+    /// to delete the file, never to trust a damaged era map.
     pub fn load(path: &Path, dev_size: u64, granularity: u64) -> Result<(Self, bool)> {
-        let mut f = std::fs::File::open(path)
-            .with_context(|| format!("open {}", path.display()))?;
-        let mut hdr = [0u8; 52];
-        f.read_exact(&mut hdr)?;
-        if &hdr[0..8] != META_MAGIC {
+        let raw = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        if raw.len() < HDR_LEN {
+            bail!("{}: truncated metadata file", path.display());
+        }
+        if &raw[0..8] != META_MAGIC {
             bail!("{}: not a ublkera metadata file", path.display());
         }
-        let version = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
+        let version = u32::from_le_bytes(raw[8..12].try_into().unwrap());
         if version != META_VERSION {
             bail!("{}: unsupported metadata version {version}", path.display());
         }
-        let m_gran = u64::from_le_bytes(hdr[12..20].try_into().unwrap());
-        let m_size = u64::from_le_bytes(hdr[20..28].try_into().unwrap());
-        let m_era = u32::from_le_bytes(hdr[28..32].try_into().unwrap());
-        let m_chunks = u64::from_le_bytes(hdr[32..40].try_into().unwrap());
-        let m_clean = u32::from_le_bytes(hdr[40..44].try_into().unwrap()) != 0;
-        let m_gen = u64::from_le_bytes(hdr[44..52].try_into().unwrap());
+        // Integrity before meaning: everything below trusts these bytes.
+        let stored = u32::from_le_bytes(raw[CRC_OFF..CRC_OFF + 4].try_into().unwrap());
+        let mut hdr = raw[..HDR_LEN].to_vec();
+        hdr[CRC_OFF..CRC_OFF + 4].fill(0);
+        if stored != crc32(&[&hdr, &raw[HDR_LEN..]]) {
+            bail!(
+                "{}: checksum mismatch (corrupted metadata); delete it to start a \
+                 fresh history (consumers then fall back to a full copy)",
+                path.display()
+            );
+        }
+        let m_gran = u64::from_le_bytes(raw[12..20].try_into().unwrap());
+        let m_size = u64::from_le_bytes(raw[20..28].try_into().unwrap());
+        let m_era = u32::from_le_bytes(raw[28..32].try_into().unwrap());
+        let m_chunks = u64::from_le_bytes(raw[32..40].try_into().unwrap());
+        let m_clean = u32::from_le_bytes(raw[40..44].try_into().unwrap()) != 0;
+        let m_gen = u64::from_le_bytes(raw[44..52].try_into().unwrap());
         if m_gran != granularity {
             bail!(
                 "metadata granularity {m_gran} does not match requested {granularity}; \
@@ -206,8 +251,10 @@ impl EraState {
         if m_chunks != state.nr_chunks() {
             bail!("metadata chunk count mismatch");
         }
-        let mut body = vec![0u8; state.eras.len() * 4];
-        f.read_exact(&mut body)?;
+        let body = &raw[HDR_LEN..];
+        if body.len() != state.eras.len() * 4 {
+            bail!("metadata body length mismatch");
+        }
         for (i, e) in state.eras.iter().enumerate() {
             let v = u32::from_le_bytes(body[i * 4..i * 4 + 4].try_into().unwrap());
             e.store(v, Ordering::Relaxed);
@@ -281,6 +328,111 @@ mod tests {
         l.mark_all_dirty();
         let dirty: u64 = l.ranges_since(1).iter().map(|r| r.len).sum();
         assert_eq!(dirty, 1 << 20, "whole device must be reported changed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Simulate a crash at every byte of a checkpoint save. `save` writes a
+    /// tmp file and renames, so a crash can only leave: the previous file plus
+    /// a torn tmp (any prefix, including empty and complete), or the renamed
+    /// new file. Recovery must load a parseable file in every one of those
+    /// states, see it marked unclean (both the attach marker and mid-attach
+    /// checkpoint saves are), and degrade to full-dirty. Payload corruption of
+    /// the *main* file is outside this model: rename never exposes a torn main
+    /// file, and there is no checksum to catch external bit rot.
+    #[test]
+    fn crash_at_every_byte_of_a_save_degrades_safely() {
+        let dir = std::env::temp_dir().join(format!("ublkera-test-torn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("meta.bin");
+        let tmp = path.with_extension("tmp");
+
+        // The attach marker that a checkpoint save would be replacing.
+        let s = EraState::new(1 << 20, 65536).unwrap();
+        s.mark_write(0, 1);
+        s.save(&path, false).unwrap();
+        let marker = std::fs::read(&path).unwrap();
+
+        // The bytes a subsequent checkpoint save would write.
+        s.checkpoint();
+        s.mark_write(65536 * 3, 1);
+        let scratch = dir.join("scratch.bin");
+        s.save(&scratch, false).unwrap();
+        let newer = std::fs::read(&scratch).unwrap();
+
+        for cut in 0..=newer.len() {
+            std::fs::write(&path, &marker).unwrap();
+            std::fs::write(&tmp, &newer[..cut]).unwrap();
+
+            // What manager::add does on the next attach.
+            let (l, clean) = EraState::load(&path, 1 << 20, 65536)
+                .unwrap_or_else(|e| panic!("cut={cut}: recovery load failed: {e:#}"));
+            assert!(!clean, "cut={cut}: marker must be unclean");
+            l.mark_all_dirty();
+            let dirty: u64 = l.ranges_since(0).iter().map(|r| r.len).sum();
+            assert_eq!(dirty, 1 << 20, "cut={cut}: full-dirty fallback");
+
+            // And the next save must succeed over the leftover tmp file.
+            l.save(&path, false).unwrap_or_else(|e| panic!("cut={cut}: re-save failed: {e:#}"));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A truncated metadata file (external corruption; a crash cannot produce
+    /// one, see above) must fail to load at every length — never load with a
+    /// short chunk array or partial header.
+    #[test]
+    fn truncated_metadata_never_loads() {
+        let dir = std::env::temp_dir().join(format!("ublkera-test-trunc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("meta.bin");
+        let s = EraState::new(1 << 20, 65536).unwrap();
+        s.mark_write(0, 1);
+        s.save(&path, true).unwrap();
+        let full = std::fs::read(&path).unwrap();
+
+        for cut in 0..full.len() {
+            std::fs::write(&path, &full[..cut]).unwrap();
+            assert!(
+                EraState::load(&path, 1 << 20, 65536).is_err(),
+                "truncation at {cut}/{} bytes must not load",
+                full.len()
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// External bit rot: corrupt every byte of the file in turn (and append
+    /// trailing garbage); the CRC must reject each one. A corrupted era array
+    /// that loaded silently would under-report changes — the one forbidden
+    /// failure.
+    #[test]
+    fn corrupted_metadata_never_loads() {
+        let dir = std::env::temp_dir().join(format!("ublkera-test-rot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("meta.bin");
+        let s = EraState::new(1 << 20, 65536).unwrap();
+        s.mark_write(65536 * 3, 1);
+        s.checkpoint();
+        s.save(&path, true).unwrap();
+        let full = std::fs::read(&path).unwrap();
+
+        for i in 0..full.len() {
+            let mut bad = full.clone();
+            bad[i] ^= 0xFF;
+            std::fs::write(&path, &bad).unwrap();
+            assert!(
+                EraState::load(&path, 1 << 20, 65536).is_err(),
+                "flipped byte {i}/{} must not load",
+                full.len()
+            );
+        }
+        let mut bad = full.clone();
+        bad.push(0);
+        std::fs::write(&path, &bad).unwrap();
+        assert!(
+            EraState::load(&path, 1 << 20, 65536).is_err(),
+            "trailing garbage must not load"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
