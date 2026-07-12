@@ -16,6 +16,8 @@ pub struct EraTgt {
     pub back_file_path: String,
     pub back_file: std::fs::File,
     pub direct_io: bool,
+    /// advertise DISCARD upward; see `backing_supports_discard`
+    pub discard: bool,
 }
 
 const BLK_IOCTL_TYPE: u8 = 0x12; // linux/fs.h
@@ -43,6 +45,41 @@ nix::ioctl_read_bad!(
 const CDEV_FIXED_FD: u32 = 0;
 /// registered-file index of the backing device/file
 const BACKING_FIXED_FD: u32 = CDEV_FIXED_FD + 1;
+
+/// ublk_cmd.h; missing from libublk's generated bindings (same gap as the
+/// `seg` params field). Without this attr the kernel treats the device as
+/// write-through and never sends FLUSH, so a consumer's fsync would be
+/// acked without ever reaching the backing store.
+const UBLK_ATTR_VOLATILE_CACHE: u32 = 1 << 2;
+
+/// Whether the backing store can actually execute our DISCARD passthrough
+/// (an fallocate PUNCH_HOLE). On a regular file that deallocates the extent —
+/// always available. On a block device the kernel implements PUNCH_HOLE as
+/// WRITE_ZEROES with no fallback, so it only works when the backing device
+/// advertises write-zeroes; otherwise every discard would fail with
+/// EOPNOTSUPP mid-flight. We probe sysfs and simply don't advertise DISCARD
+/// when the backing can't take it — the consumer's blkdiscard then fails
+/// cleanly upfront instead of erroring per-bio.
+pub fn backing_supports_discard(f: &std::fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = f.metadata() else { return false };
+    if meta.file_type().is_file() {
+        return true;
+    }
+    if !meta.file_type().is_block_device() {
+        return false;
+    }
+    let rdev = meta.rdev();
+    let sys = format!("/sys/dev/block/{}:{}", libc::major(rdev), libc::minor(rdev));
+    let Ok(canon) = std::fs::canonicalize(&sys) else { return false };
+    // whole disks have queue/ directly; partitions sit one level below it
+    for dir in [canon.join("queue"), canon.parent().map(|p| p.join("queue")).unwrap_or_default()] {
+        if let Ok(s) = std::fs::read_to_string(dir.join("write_zeroes_max_bytes")) {
+            return s.trim().parse::<u64>().map(|v| v > 0).unwrap_or(false);
+        }
+    }
+    false
+}
 
 /// (size_bytes, logical_bs_shift, physical_bs_shift) of a file or block device.
 pub fn backing_size(f: &std::fs::File) -> Result<(u64, u8, u8)> {
@@ -78,9 +115,16 @@ pub fn init_tgt(dev: &mut UblkDev, tgt: &EraTgt, dev_size: u64, bs_shifts: (u8, 
     t.nr_fds = nr_fds + 1;
 
     t.dev_size = dev_size;
+    let mut types = libublk::sys::UBLK_PARAM_TYPE_BASIC;
+    if tgt.discard {
+        types |= libublk::sys::UBLK_PARAM_TYPE_DISCARD;
+    }
     t.params = libublk::sys::ublk_params {
-        types: libublk::sys::UBLK_PARAM_TYPE_BASIC | libublk::sys::UBLK_PARAM_TYPE_DISCARD,
+        types,
         basic: libublk::sys::ublk_param_basic {
+            // Declare a volatile cache so the kernel delivers FLUSH to us;
+            // handle_io_cmd forwards it as an fsync on the backing store.
+            attrs: UBLK_ATTR_VOLATILE_CACHE,
             logical_bs_shift: bs_shifts.0,
             physical_bs_shift: bs_shifts.1,
             io_opt_shift: 12,
@@ -89,14 +133,19 @@ pub fn init_tgt(dev: &mut UblkDev, tgt: &EraTgt, dev_size: u64, bs_shifts: (u8, 
             dev_sectors: dev_size >> 9,
             ..Default::default()
         },
-        // Advertise DISCARD so the kernel actually forwards blkdiscard to us;
-        // handle_io_cmd turns it into a hole-punch/discard on the backing store.
-        // WRITE_ZEROES is left unadvertised (max_write_zeroes_sectors = 0).
-        discard: libublk::sys::ublk_param_discard {
-            discard_granularity: 1u32 << bs_shifts.0,
-            max_discard_sectors: 1 << 22, // 2 GiB per request; kernel splits larger
-            max_discard_segments: 1,
-            ..Default::default()
+        // Advertise DISCARD (when the backing can execute it) so the kernel
+        // forwards blkdiscard to us; handle_io_cmd turns it into a hole punch
+        // on the backing store. WRITE_ZEROES is left unadvertised
+        // (max_write_zeroes_sectors = 0).
+        discard: if tgt.discard {
+            libublk::sys::ublk_param_discard {
+                discard_granularity: 1u32 << bs_shifts.0,
+                max_discard_sectors: 1 << 22, // 2 GiB per request; kernel splits larger
+                max_discard_segments: 1,
+                ..Default::default()
+            }
+        } else {
+            Default::default()
         },
         ..Default::default()
     };
@@ -128,8 +177,9 @@ fn make_sqe(op: u32, off: u64, len: u64, buf: *mut u8) -> Option<squeue::Entry> 
                 .build()
                 .flags(squeue::Flags::FIXED_FILE)
         }
-        // DISCARD => punch a hole in the backing range. On a block device this
-        // issues a real discard; on a regular file it deallocates the extent.
+        // DISCARD => punch a hole in the backing range: extent deallocation
+        // on a regular file, WRITE_ZEROES on a block device. Only reachable
+        // when `backing_supports_discard` said the backing can take it.
         libublk::sys::UBLK_IO_OP_DISCARD => {
             opcode::Fallocate::new(types::Fixed(BACKING_FIXED_FD), len)
                 .offset(off)
@@ -165,13 +215,15 @@ fn handle_io_cmd(q: &UblkQueue, tag: u16, io: &UblkIOCtx, era: &EraState, buf: &
     if io.is_tgt_io() {
         let res = io.result();
         if res != -libc::EAGAIN {
-            // Stamp the era map once the backing store accepted a data-changing
-            // op, so the map never claims less than what may have changed. WRITE
-            // reports the byte count in `res`; DISCARD reports 0 on success, so
-            // use the requested range length.
+            // Stamp the era map for every data-changing op, including failed or
+            // short ones: an errored WRITE/DISCARD may still have reached the
+            // medium partially, and the map must never claim less than what may
+            // have changed. Over-reporting a failed op that changed nothing only
+            // costs the consumer an extra copy.
             match op {
-                libublk::sys::UBLK_IO_OP_WRITE if res > 0 => era.mark_write(off, res as u64),
-                libublk::sys::UBLK_IO_OP_DISCARD if res >= 0 => era.mark_write(off, bytes),
+                libublk::sys::UBLK_IO_OP_WRITE | libublk::sys::UBLK_IO_OP_DISCARD => {
+                    era.mark_write(off, bytes)
+                }
                 _ => {}
             }
             q.complete_io_cmd_unified(tag, BufDesc::Slice(buf), Ok(UblkIORes::Result(res)))

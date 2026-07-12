@@ -416,6 +416,7 @@ fn supervise_device(
 ) {
     let tgt = EraTgt {
         back_file_path: spec.backing.clone(),
+        discard: target::backing_supports_discard(&back_file),
         back_file,
         direct_io: !spec.buffered,
     };
