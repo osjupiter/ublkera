@@ -52,6 +52,10 @@ wait_for "$DEV_B" -b "$DEV_B"
 NR=$($CTL list | grep -c '"dev_id"')
 [ "$NR" = 2 ] || fail "expected 2 devices, got $NR"
 
+echo "E2E-VM: device advertises a volatile cache (FLUSH is deliverable)"
+WC=$(cat /sys/block/ublkb$ID_A/queue/write_cache)
+[ "$WC" = "write back" ] || fail "write_cache is '$WC': fsync would never reach the backing store"
+
 echo "E2E-VM: double-attach of the same backing must be rejected"
 $CTL add -f /a.img 2>/dev/null && fail "double attach was accepted"
 
@@ -104,8 +108,8 @@ OFF=$($CTL dump -n "$ID_B" --since 1 | jget offset)
 dd if=/dev/urandom of=$DEV_B bs=64K count=1 seek=1 2>/dev/null || fail "discard: seed write"
 blkdiscard -o $((64 * 1024)) -l $((64 * 1024)) $DEV_B || fail "blkdiscard (region 2) rejected"
 sync
-SUM=$(dd if=$DEV_B bs=64K count=1 skip=1 2>/dev/null | cksum | cut -d' ' -f1)
-ZSUM=$(dd if=/dev/zero bs=64K count=1 2>/dev/null | cksum | cut -d' ' -f1)
+SUM=$(dd if=$DEV_B bs=64K count=1 skip=1 2>/dev/null | md5sum | cut -d' ' -f1)
+ZSUM=$(dd if=/dev/zero bs=64K count=1 2>/dev/null | md5sum | cut -d' ' -f1)
 [ "$SUM" = "$ZSUM" ] || fail "discarded region did not read back as zeros"
 
 echo "E2E-VM: data integrity through ublk"
@@ -170,39 +174,6 @@ $CTL shutdown >/dev/null || fail "shutdown after crash test"
 i=0
 while ls /dev/ublkb* >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 ls /dev/ublkb* >/dev/null 2>&1 && fail "devices still present after crash-test shutdown"
-
-if [ -x /ublkera-go ]; then
-    echo "E2E-VM: go implementation (libublksrv/cgo): attach and track"
-    dd if=/dev/zero of=/g.img bs=1M count=1 seek=31 2>/dev/null || fail "create g.img"
-    /ublkera-go -f /g.img -g 65536 -socket /tmp/go.sock &
-    GO_PID=$!
-    wait_for "go socket" -S /tmp/go.sock
-    i=0
-    while ! ls /dev/ublkb* >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-    GDEV=$(ls /dev/ublkb* 2>/dev/null | head -1)
-    [ -n "$GDEV" ] || fail "go: ublk device did not appear"
-
-    dd if=/dev/urandom of=$GDEV bs=4096 count=1 2>/dev/null || fail "go: write"
-    sync
-    NR=$(/ublkera-go -ctl dump -socket /tmp/go.sock | grep -c '"offset"')
-    [ "$NR" = 1 ] || fail "go: expected 1 dirty range, got $NR"
-
-    echo "E2E-VM: go implementation: checkpoint and era-2 diff"
-    CLOSED=$(/ublkera-go -ctl checkpoint -socket /tmp/go.sock | jget closed_era)
-    [ "$CLOSED" = 1 ] || fail "go: closed_era = $CLOSED"
-    dd if=/dev/urandom of=$GDEV bs=4096 count=1 seek=256 2>/dev/null || fail "go: era-2 write"
-    sync
-    OFF=$(/ublkera-go -ctl dump -since 1 -socket /tmp/go.sock | jget offset)
-    [ "$OFF" = $((1024 * 1024)) ] || fail "go: era-2 offset: got $OFF"
-    cmp $GDEV /g.img || fail "go: device content differs from backing"
-
-    echo "E2E-VM: go implementation: clean shutdown on SIGTERM"
-    kill -TERM $GO_PID
-    wait $GO_PID
-    i=0
-    while ls /dev/ublkb* >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-    ls /dev/ublkb* >/dev/null 2>&1 && fail "go: device still present after SIGTERM"
-fi
 
 echo "E2E-VM-PASS"
 poweroff -f

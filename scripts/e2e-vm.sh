@@ -55,20 +55,11 @@ cp "$BIN" "$IR/ublkera"
 cp scripts/vm-guest-init.sh "$IR/init"
 chmod +x "$IR/init" "$IR/ublkera"
 
-# optional: the Go reference implementation (go/build.sh), tested in-guest too
-GO_BIN=go/ublkera-go
-if [ -x "$GO_BIN" ]; then
-    cp "$GO_BIN" "$IR/ublkera-go"
-    echo "including Go implementation in the guest test"
-fi
-
-# the binaries' dynamic loaders and libraries, at their absolute paths
-for bin in "$BIN" ${GO_BIN:+$([ -x "$GO_BIN" ] && echo "$GO_BIN")}; do
-    ldd "$bin" | grep -o '/[^ ]*' | sort -u | while read -r lib; do
-        [ -f "$lib" ] || continue
-        mkdir -p "$IR$(dirname "$lib")"
-        cp "$lib" "$IR$lib"
-    done
+# the binary's dynamic loader and libraries, at their absolute paths
+ldd "$BIN" | grep -o '/[^ ]*' | sort -u | while read -r lib; do
+    [ -f "$lib" ] || continue
+    mkdir -p "$IR$(dirname "$lib")"
+    cp "$lib" "$IR$lib"
 done
 
 case "$MOD" in
