@@ -63,7 +63,7 @@
 1. フルバックアップを取得
 2. checkpoint 実行 → closed_era = N を控える
 3. (時間経過、書き込み発生)
-4. 静止点が必要なら fsfreeze → checkpoint → unfreeze。closed_era = M
+4. checkpoint → closed_era = M
 5. dump --since N
 6. ranges の各 (offset, len) を /dev/ublkbX から読み、
    バックアップ先の同じ offset に書く
@@ -71,7 +71,23 @@
 ```
 
 `--since` に渡すのは**基準にしたい checkpoint の `closed_era`**。
-その checkpoint 以降の変更が返る。
+その checkpoint 以降の変更が返る。凍結は不要 — checkpoint やコピーと
+競合した書き込みも今回か次回の差分に必ず入る(取りこぼしなし。
+[concurrency.md](concurrency.md) §3)。
+
+ただし IO を流したままコピーした像は **fuzzy**(ブロックごとに読んだ
+瞬間が違う混合状態)であり、ある一瞬のデバイス状態とは一致しない。
+点整合(point-in-time)の像が必要な場合、fsfreeze → checkpoint →
+unfreeze **だけでは足りない**(unfreeze 後のコピー中に上書きされた
+ブロックは新しい内容で読まれる)。差分が小さくなるまで上の手順を
+繰り返し、最後の 1 回だけ凍結したままコピーする:
+
+```text
+loop: checkpoint → dump --since 前回 → コピー   (差分が縮むまで)
+fsfreeze -f → checkpoint → 最後の差分をコピー → fsfreeze -u
+```
+
+凍結窓は最終差分のコピー時間だけで済む。
 
 ## era 番号について
 

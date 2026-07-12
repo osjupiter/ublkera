@@ -56,11 +56,10 @@ sudo ./target/release/ublkera list
 sudo ./target/release/ublkera status -n 0
 sudo ./target/release/ublkera status -f /path/to/a.img
 
-# フルバックアップ直後に checkpoint(閉じた era 番号を控える)
-sudo fsfreeze -f /mnt                      # 整合性が必要なら凍結してから
+# フルバックアップ直後に checkpoint(閉じた era 番号を控える)。
+# 凍結は不要: checkpoint と競合した書き込みも今回か次回の差分に必ず入る
 sudo ./target/release/ublkera checkpoint -n 0        # 1台だけ
 sudo ./target/release/ublkera checkpoint --all       # 全対象一括
-sudo fsfreeze -u /mnt
 # => {"ok":true,"closed_era":1,"current_era":2,"meta_saved":true}
 
 # era 1 の checkpoint 以降に変わった範囲だけ取り出す
@@ -240,5 +239,6 @@ VM の状態は `.vm/`(git 管理外)、ベースイメージは `~/.cache/ublke
 - 1デーモンで複数デバイスを管理し、実行中に対象を増減できる(dm-era はデバイス毎に dmsetup)
 - メタデータは常時オンディスクではなくメモリ上(checkpoint 時に保存)。
   dm-era のようなクラッシュセーフ era メタデータではない
-- checkpoint 中も IO をブロックしない。整合点が必要なら fsfreeze してから checkpoint
+- checkpoint 中も IO をブロックしない(取りこぼしはない。点整合の像が
+  必要な場合の手順は [docs/dump-format.md](docs/dump-format.md) を参照)
 - WRITE_ZEROES 未対応(DISCARD は対応。バッキングの discard/hole-punch へパススルー)
