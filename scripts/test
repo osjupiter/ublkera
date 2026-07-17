@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# 統一テストランナー(blktests の ./check に相当する単一の入口)。
+#
+#   ./scripts/test           # quick: cargo test + e2e + sandwich + chaos 1本
+#   ./scripts/test stress    # noble VM でブロック層ストレス(fio/ext4/dm-flakey)
+#   ./scripts/test soak      # chaos 長時間(EPISODES/OPS/SEED で調整)
+#   ./scripts/test all       # 上記すべて
+#
+# 契約: すべて成功なら exit 0。前提が無いスイートは FAIL ではなく SKIP。
+set -uo pipefail
+
+cd "$(dirname "$0")/.."
+GROUP=${1:-quick}
+
+PASS=() ; FAIL=() ; SKIP=()
+OUT=$(mktemp)
+trap 'rm -f "$OUT"' EXIT
+
+suite() { # suite <name> <command...>
+    local name=$1; shift
+    echo
+    echo "==== $name ===="
+    "$@" 2>&1 | tee "$OUT"
+    local rc=${PIPESTATUS[0]}
+    if [ "$rc" -ne 0 ]; then
+        FAIL+=("$name")
+    elif grep -q '^SKIP:' "$OUT"; then
+        # 各スイートの skip() は「前提なし」を exit 0 + SKIP: 行で表す
+        SKIP+=("$name")
+    else
+        PASS+=("$name")
+    fi
+}
+
+quick() {
+    suite "cargo test (ublkera + ublkfault)" cargo test --quiet
+    suite "e2e-vm (機能スイート)" ./scripts/e2e-vm.sh
+    suite "ublkfault e2e-vm (fault デバイス単体)" bash -c 'cd ublkfault && ./scripts/e2e-vm.sh'
+    suite "sandwich-vm (契約シナリオ + CBT/D-state)" ./scripts/sandwich-vm.sh
+    suite "chaos-vm (known seeds + 1 episode)" env EPISODES="${EPISODES:-1}" OPS="${OPS:-120}" ./scripts/chaos-vm.sh
+}
+
+stress() {
+    if ./scripts/vm-ubuntu.sh status | grep -q running; then
+        suite "blkstress (noble VM)" ./scripts/vm-ubuntu.sh stress
+    else
+        echo "SKIP: blkstress (noble VM が起動していない: ./scripts/vm-ubuntu.sh up)"
+        SKIP+=("blkstress")
+    fi
+}
+
+soak() {
+    suite "chaos soak" env EPISODES="${EPISODES:-20}" OPS="${OPS:-300}" SEED="${SEED:-$$}" \
+        ./scripts/chaos-vm.sh
+}
+
+[ -x target/release/ublkera ] && [ -x target/release/ublkfault ] || {
+    echo "== build =="
+    cargo build --release || exit 1
+}
+
+case "$GROUP" in
+    quick)  quick ;;
+    stress) stress ;;
+    soak)   soak ;;
+    all)    quick; stress; soak ;;
+    *)      echo "usage: $0 [quick|stress|soak|all]"; exit 2 ;;
+esac
+
+echo
+echo "==== summary ===="
+for s in "${PASS[@]:-}";  do [ -n "$s" ] && echo "PASS  $s"; done
+for s in "${SKIP[@]:-}";  do [ -n "$s" ] && echo "SKIP  $s"; done
+for s in "${FAIL[@]:-}";  do [ -n "$s" ] && echo "FAIL  $s"; done
+[ ${#FAIL[@]} -eq 0 ]

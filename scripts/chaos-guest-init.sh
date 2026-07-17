@@ -24,16 +24,28 @@ while [ ! -e /dev/ublk-control ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); 
 SEED=1
 EPISODES=5
 OPS=150
+KNOWN=""
 for w in $(cat /proc/cmdline); do
     case "$w" in
         chaos_seed=*) SEED=${w#*=} ;;
         chaos_episodes=*) EPISODES=${w#*=} ;;
         chaos_ops=*) OPS=${w#*=} ;;
+        chaos_known=*) KNOWN=${w#*=} ;;
     esac
 done
 
 # --buffered: the backing file lives on the initramfs rootfs (ramfs), which
 # has no O_DIRECT. The device itself is still opened O_DIRECT by chaos.
+
+# regression pass: replay every known seed (known_seeds/*.env) first
+for pair in $(echo "$KNOWN" | tr ',' ' '); do
+    s=${pair%%:*}
+    o=${pair##*:}
+    echo "CHAOS-VM: known seed $s (ops=$o)"
+    /chaos --ublkera /ublkera --dir "/tmp/chaos-k$s" --seed "$s" --ops "$o" --buffered ||
+        fail "known seed=$s"
+done
+
 n=0
 while [ $n -lt $EPISODES ]; do
     s=$((SEED + n))

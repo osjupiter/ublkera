@@ -181,9 +181,16 @@ generation はトラッキング履歴ごとのランダムな 64bit(hex)で、a
 ## テスト
 
 ```sh
+./scripts/test             # ★これが入口。quick 一式(ユニット+e2e+sandwich+chaos)を実行
+./scripts/test soak        # カオス長時間走行(EPISODES/OPS/SEED で調整)
+```
+
+個別に走らせる場合:
+
+```sh
 cargo test                 # era マップのユニットテスト(クラッシュ点の全列挙を含む)
 ./scripts/e2e-vm.sh        # ★root不要: QEMU VM内で実デバイス E2E 一式を実行
-./scripts/chaos-vm.sh      # ★root不要: シード付きカオステスト(クラッシュ・復旧・CBT不変条件)
+./scripts/chaos-vm.sh      # ★root不要: シード付きカオステスト(known_seeds 再生+ランダム)
 ./scripts/sandwich-vm.sh   # ★root不要: ublkfault を下に挟む契約テスト(FLUSH転送・電源断・EIO)
 sudo ./scripts/e2e.sh      # ホスト上で直接実行する場合(root必要)
 ```

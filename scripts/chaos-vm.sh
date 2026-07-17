@@ -16,6 +16,17 @@ SEED=${SEED:-1}
 EPISODES=${EPISODES:-5}
 OPS=${OPS:-150}
 
+# 過去に何かを捕まえた seed(known_seeds/*.env)はランダムエピソードの前に
+# 必ず再生する。準決定的なので再現は確率的だが、統計的な回帰網になる。
+KNOWN=""
+for f in known_seeds/*.env; do
+    [ -f "$f" ] || continue
+    SEED_K="" OPS_K=""
+    # shellcheck disable=SC1090
+    . "./$f"
+    [ -n "$SEED_K" ] && KNOWN="$KNOWN${KNOWN:+,}$SEED_K:${OPS_K:-$OPS}"
+done
+
 fail() { echo "FAIL: $*" >&2; exit 1; }
 skip() { echo "SKIP: $*" >&2; exit 0; }
 
@@ -24,7 +35,7 @@ command -v cpio >/dev/null || skip "cpio not installed"
 
 KREL=$(uname -r)
 KERNEL="/boot/vmlinuz-$KREL"
-[ -r "$KERNEL" ] || skip "$KERNEL not readable"
+[ -r "$KERNEL" ] || skip "$KERNEL not readable (fix: sudo chmod +r /boot/vmlinuz-*)"
 
 MOD=""
 for m in "/lib/modules/$KREL/kernel/drivers/block/ublk_drv.ko" \
@@ -83,7 +94,7 @@ set +e
 timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
     $KVM_ARGS -m 1024 -smp 2 -nographic -no-reboot \
     -kernel "$KERNEL" -initrd "$WORK/initrd.img" \
-    -append "console=ttyS0 rdinit=/init panic=-1 loglevel=4 chaos_seed=$SEED chaos_episodes=$EPISODES chaos_ops=$OPS" \
+    -append "console=ttyS0 rdinit=/init panic=-1 loglevel=4 chaos_seed=$SEED chaos_episodes=$EPISODES chaos_ops=$OPS chaos_known=$KNOWN" \
     </dev/null 2>&1 | tee "$LOG" | grep --line-buffered "CHAOS"
 QRC=${PIPESTATUS[0]}
 set -e

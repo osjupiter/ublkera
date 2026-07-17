@@ -20,7 +20,7 @@ command -v cpio >/dev/null || skip "cpio not installed"
 
 KREL=$(uname -r)
 KERNEL="/boot/vmlinuz-$KREL"
-[ -r "$KERNEL" ] || skip "$KERNEL not readable"
+[ -r "$KERNEL" ] || skip "$KERNEL not readable (fix: sudo chmod +r /boot/vmlinuz-*)"
 
 MOD=""
 for m in "/lib/modules/$KREL/kernel/drivers/block/ublk_drv.ko" \

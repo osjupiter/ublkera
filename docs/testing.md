@@ -131,3 +131,70 @@ ublkera の要件なので、ファイルはこのリポジトリが所有する
 - `./scripts/e2e-vm.sh` — 機能の e2e スイート(初期からあるもの。
   多デバイス、-f 指定、DISCARD、generation、クラッシュ復旧の各シナリオ)
 - [manual-test.md](manual-test.md) — ハッシュ三者一致の手動検証手順
+
+## テストケースの管理
+
+### 参考にした流儀
+
+ブロック層まわりの定番スイートと DST 系プロジェクトの共通項:
+
+- **[blktests](https://github.com/linux-blktests/blktests) / xfstests** —
+  1ケース1ファイル(`tests/<グループ>/NNN`)、単一の入口 `./check` に
+  グループ名でもケース名でも渡せる(`./check loop block/002`)。前提を
+  満たさないケースは fail ではなく **notrun(スキップ)**。グループタグ
+  (auto = 回帰として安定、quick = 短時間、dangerous)で用途を分ける。
+  新規ケースは `./new` のテンプレートから
+- **[TigerBeetle VOPR](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/internals/vopr.md)** —
+  失敗の再現子は **(seed, git commit)** の組。ランダムで見つけたバグは
+  seed 再現に頼り続けず、**原因特定後は決定的な専用テストに固定**する
+  (「ランダムで踏みにくいケースは専用テストとして書く」)
+- **[FoundationDB](https://apple.github.io/foundationdb/testing.html)** —
+  テスト仕様は宣言的なファイル(`tests/fast|slow|rare/*.toml`)で、
+  実行頻度・時間でディレクトリ分類。ランナーとの契約は「exit 0 = pass」だけ
+
+### このリポジトリの規約
+
+**入口は1つ**: [`./scripts/test`](../scripts/test)(exit 0 = 全部成功)。
+
+```sh
+./scripts/test           # quick: cargo test + e2e + sandwich + chaos 1本(〜数分)
+./scripts/test stress    # noble VM のブロック層ストレス(VM 未起動なら SKIP)
+./scripts/test soak      # chaos 長時間(EPISODES/OPS/SEED で調整)
+./scripts/test all
+```
+
+**ケースの置き場**は種類で決まる:
+
+| 種類 | 置き場 | 1ケースの単位 |
+|---|---|---|
+| 決定的(ロジック・クラッシュ点列挙) | `src/*.rs` の `#[cfg(test)]` | テスト関数 |
+| ブロック層契約(宣言的に書けるもの) | [scenarios/](../scenarios/)`*.scen` | ファイル |
+| 動的な値・タイミングが要るもの | 各 guest-init のシェル節 | `echo "XXX-VM: ..."` の節 |
+| ランダム探索 | chaos(seed 駆動) | seed |
+
+**バグを見つけたときの手順**(TigerBeetle 流):
+
+1. 原因を特定したら、**最も決定的な層に回帰テストを固定する**
+   (ユニット > シナリオ > e2e 節 の優先順)。これが恒久的な網
+2. chaos / soak で見つけた場合は seed を
+   [known_seeds/](../known_seeds/) にも記録する(1件1ファイル、
+   `SEED_K`/`OPS_K` + 何を捕まえたかのコメント)。chaos はランダムの前に
+   known seeds を必ず再生する。ただし実カーネルを挟む準決定性のため
+   seed 再現は確率的 — だから 1 が主で seed は従
+
+**マーカー規約**: 各 VM スイートはシリアルコンソールに
+`<SUITE>-PASS` / `<SUITE>-FAIL: 理由` を1行出し、ホスト側ランナーは
+それだけで判定する(FDB の exit-0 契約の VM 版)。シナリオランナーは
+`SCENARIO <name>: N steps ok` を出す。
+
+**検証器はミューテーションで確認する**: 新しい検証を足したら、対象を
+故意に壊して FAIL することを一度見る(このリポの全検証器で実施済み。
+「落ちないテスト」は cksum 欠落のような形で静かに腐る)。
+
+### 見送っているもの
+
+- guest-init のケース完全分割(blktests 式の 1ケース1ファイル)—
+  initramfs に載せて1プロセスで走る制約下では節+マーカーで足りている。
+  ケース数が今の倍になったら再検討
+- golden output(xfstests の `.out`)— 検証は JSON フィールドの比較で
+  済んでおり、出力全体の固定は壊れやすさの方が勝る
